@@ -1,4 +1,4 @@
-# CS3500-Operating-Systems-Labs
+# CS3500 (Operating Systems) Labs
 
 Each assignment involved modifying the xv6-riscv source code to achieve a given task. 
 Each folder is for a particular assignment. The folder names describe the assignment objectives in brief. 
