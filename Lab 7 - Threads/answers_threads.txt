@@ -1,0 +1,112 @@
+-Section 2.2 
+1. While between two threads what is saved as a part of context?
+The RISCV calling conventions ensures that the caller saved registers are saved on the corresponding stack before control reaches the thread_switch function, 
+so we definitely need to save the callee saved registers i.e. sp, s0 - s11. Apart from these, after thread_switch(t1, t2), we need to know where control must
+jump back to in t2. So, we also need to save the return address register (ra).
+Therefore, the registers that need to be saved as part of the context are ra, sp, s0 - s11. 
+For the very same reasons, the xv6 kernel thread swtch function also saves the very same set of registers. 
+
+2. Explain the changes that you made in uthread.c and uthread switch.S?
+As part of my implementation, I haven't kept a dedicated context location, instead, the top 112 bytes of the stack represent the context. The general purpose 
+stack usage happens only after the 112nd byte i.e. the 15th double-word onwards. The changes required for the same are
+
+    1) thread_switch is invoked as 
+    thread_switch((uint64)t->stack, (uint64)next_thread->stack);
+    in the appropriate place in the thread_schedule() function. 
+    In thread_switch, I have added code for saving the ra, sp, s0 - s11 registers in the first 14 double-word locations considering the a0 register 
+    (which contains (t->stack) because of the calling convention) as the base pointer. I have also added code for restoring the ra, sp, s0 - s11 registers from 
+    the first 14 double-word locations considering the a1 register (which contains (next_thread->stack) because of the calling convention) as a base pointer. 
+    Then we invoke the ret instruction to return back to where the next->thread had stopped execution earlier. 
+
+    2) In the thread_create function, I have added code to setup the context for the case when the new thread is scheduled for the first time. 
+    *((uint64*)t->stack) = (uint64)func;
+    *((uint64*)t->stack + 1) = (uint64)((uint64*)t->stack + 112);
+    These lines ensure that when we switch to this thread, ra is loaded with the address of the required thread's starting function and the sp register is 
+    set to the 113th byte from the base t->stack (the first 112 bytes/14 double-words are reserved for the context). 
+
+3. Can an user level thread exist after termination of the containing process?
+No, a user level thread, as in our cases uses resources such as the stack. These resources are accounted for in the kernel and are associated with the process 
+which invokes these threads. Therefore, after termination of the containing process i.e. when all it's resources are reaped, the user level thread associated 
+with this process can no longer exist. 
+
+Section 3.2
+1. What are the different operations you used on mutex for this assignment?
+pthread_mutex_init(), pthread_mutex_lock(), pthread_mutex_unlock() are the three different mutex operations I used in this assignment.
+
+2. Explain briefly why keys were missing initially when running 2 threads?
+The point of this implementation was to parallelize the puts and the gets, i.e. if we want to input a bunch of (key, value) pairs into the hash table / read a bunch of (key, value)
+pairs from the hash table, instead of doing it sequentially, we could parallely do the same so as to improve the throughput. 
+We are however assured that the puts are isolated from the gets.
+When it comes to putting key value pairs into the hash table, we can definitely have one thread input into one bucket while another inputs into a different bucket. 
+But, the problem arises when two threads are simultaneously trying to access the same bucket. As the keys can be random, when multiple threads are requesting access to a single bucket
+to input some (key, value) pairs, one or more of them might alter the head of the list. This can cause issues if context switches happen in between, for example
+consider two threads T1 and T2 both accessing a bucket to add a new (key, value) pair to the head. The following scenario can arise. 
+
+T1 -> #creates newnode1
+      #newnode1->next = oldhead. 
+/* context switch */
+T2 -> #creates newnode2
+      #newnode2->next = oldhead
+      #head <- newnode2
+/* context switch */
+T2 -> #head <- newnode1
+
+The expected list was supposed to be either (newnode1)->(newnode2)->oldhead or (newnode2)->(newnode1)->oldhead. But what we have after these sequence of instructions is (newnode1)->oldhead.
+We can clearly see that the input corresponding to newnode2 was lost/overwritten. Therefore, we need to serialize access to the buckets of the hash table i.e. 
+at most one thread can access a bucket at a time for inputs. 
+
+3. What changes did you make to avoid missing any keys?
+We can serialize the access to the buckets of the hash table by having an array of locks, one for each bucket. 
+In the function put, we hold the lock for the particular bucket until any insertion/read from the bucket is completed. 
+This can be done by having the pthread_mutex_lock(&bucket_lock[i]) instruction before the start of the for loop and releasing the lock using pthread_mutex_unlock(&bucket_lock[i]) 
+at the end of the if-else block. 
+
+4. Position in which you apply lock and unlock on mutex impacts the puts/sec, justify where you used them to maximize the puts/sec.
+We have firstly identified that we need to serialize access to the entire hash table but instead serialize the access to each buckets by having locks for each bucket. This provides granularity and 
+therefore increases the throughput as the amount of parallelism being taken advantage of has increased, i.e. we allow different threads to access different buckets at the same instant of time. 
+This is the first optimization. Apart from this, we need to ensure that the critical section where we hold the lock is as small as possible while still retaining the desired correctness.
+We need to hold the lock before the for loop as the for loop iterates through the list corresponding to that bucket and in particular it reads the head of the list. 
+We need to ensure that when an access to the head of the list happens, no other thread is inserting into the same bucket (so that we do not loose the inputs). To do this, we have to hold the lock until
+the end of the if-else block (where the actual call to insert() happens). This essentially ensures that at most one thread can execute the instructions from the beginning of the for loop 
+until the end of the if-else block for a particular bucket, and this is the best we can do while ensuring correctness. 
+Note that we do not need to serialize the gets because the main reason for serializing the puts is to prevent race conditions. A race condition is said to occur when more than one processor/entity 
+requests access to a shared memory item with at least one of them modifying the shared item. This condition does not occur when we have a sequence of reads from the hash table as none of the reads
+actually modify the hash table. 
+
+Section 4.2
+1. Give an example of a scenario where you have to use barrier. 
+Lets say we are trying to find the minimum of 10 numbers parallely. We can use a binary tree sort of design for the same 
+
+                                    n1 n2  n3 n4  n5 n6  n7 n8  
+                                    \  /   \  /   \  /   \  /   
+                                     n1'    n2'    n3'    n4'
+                                      \     /        \    /
+                                        n1''          n2''
+                                              \    /
+                                                min
+
+    
+We can implement this parallely by having 4 threads compute the minimum of (n1, n2), (n3, n4), (n5, n6), (n7, n8) in parallel. 
+After all the four threads complete the computation, we can further assign the problem of finding the minimum of (n1', n2'), (n3', n4') to two threads and so on.
+Inorder to ensure that all threads from the any level of computation have completed their respective tasks, and to decide to move on to the next level, we would need to implement a barrier. This barrier 
+would wait until all the threads from the previous level have completed their tasks. 
+
+2. How did you implement barrier for the current problem?
+This is the code I have added in the barrier function 
+
+pthread_mutex_lock(&bstate.barrier_mutex);          // hold the lock for the barrier. Ensures that this entire section below is serialized, i.e. no two threads can be executing the critical section 
+                                                    // simultaneously
+bstate.nthread++;                                   // increment the value of the number of threads that have entered the barrier section 
+if(bstate.nthread == nthread)                       // in case this is the last thread to enter the barrier
+{
+    bstate.nthread = 0;                             // ensures that if any thread, after the broadcast, races around the for loop and reaches the barrier for the next iteration of the for loop, the bstate.nthread value will correctly be incremented from 0 onwards.
+    pthread_cond_broadcast(&bstate.barrier_cond);   // broadcasting to the rest of the threads waiting on the barrier condition to acquire the lock and return back to the critical section
+    bstate.round++;                                 // increment the value of bstate.round to indicate one round of the barrier has been completed
+}
+else                                                // all threads other than the last thread enter this section 
+{
+    pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex); // releases the lock and waits for a broadcast/signal (in our case broadcast). On a broadcast, acquires the lock and returns back
+}
+pthread_mutex_unlock(&bstate.barrier_mutex);        // release the barrier lock, now other threads can enter the barrier. 
+
+
